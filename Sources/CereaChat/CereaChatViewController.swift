@@ -87,7 +87,65 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
         } else {
             userTokenAssign = ""
         }
+        // The widget fetches /api/webchat/... from page JS. WKWebView does
+        // NOT copy the custom headers we set on the document request onto
+        // those sub-requests, so the server's bundle-ID allowlist check would
+        // reject them with 403 origin_not_allowed. Patch fetch/XHR at document
+        // start so same-origin API calls carry the header too.
+        let bundleIdJson = Self.jsonQuoted(Bundle.main.bundleIdentifier ?? "")
+        let headerShim = """
+        (function () {
+          var BUNDLE_ID = \(bundleIdJson);
+          var HEADER = 'X-Cerea-Bundle-Id';
+          function sameOrigin(url) {
+            try {
+              return new URL(url, window.location.href).origin
+                === window.location.origin;
+            } catch (e) { return false; }
+          }
+          var origFetch = window.fetch;
+          if (origFetch) {
+            window.fetch = function (input, init) {
+              try {
+                var url = (typeof input === 'string')
+                  ? input
+                  : (input && input.url) || '';
+                if (sameOrigin(url)) {
+                  if (typeof input !== 'string'
+                      && typeof Request !== 'undefined'
+                      && input instanceof Request) {
+                    var rh = new Headers(input.headers);
+                    rh.set(HEADER, BUNDLE_ID);
+                    input = new Request(input, { headers: rh });
+                  } else {
+                    init = init || {};
+                    var ih = new Headers(init.headers || {});
+                    ih.set(HEADER, BUNDLE_ID);
+                    init.headers = ih;
+                  }
+                }
+              } catch (e) {}
+              return origFetch.call(this, input, init);
+            };
+          }
+          var origOpen = XMLHttpRequest.prototype.open;
+          var origSend = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function (method, url) {
+            try { this.__cereaSameOrigin = sameOrigin(url); } catch (e) {}
+            return origOpen.apply(this, arguments);
+          };
+          XMLHttpRequest.prototype.send = function () {
+            try {
+              if (this.__cereaSameOrigin) {
+                this.setRequestHeader(HEADER, BUNDLE_ID);
+              }
+            } catch (e) {}
+            return origSend.apply(this, arguments);
+          };
+        })();
+        """
         let inject = """
+        \(headerShim)
         window.cereaConfig = \(cereaConfigJson);
         \(userTokenAssign)
         window.cereaSurface = 'ios';
@@ -175,19 +233,36 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
     }
 
     // MARK: - WKUIDelegate (file uploads)
-
-    public func webView(
-        _ webView: WKWebView,
-        runOpenPanelWith parameters: WKOpenPanelParameters,
-        initiatedByFrame frame: WKFrameInfo,
-        completionHandler: @escaping ([URL]?) -> Void
-    ) {
-        // Minimal implementation — apps with file-upload UX should subclass
-        // and present a UIDocumentPickerViewController / PHPickerViewController.
-        completionHandler(nil)
-    }
+    //
+    // We deliberately do NOT implement
+    // `webView(_:runOpenPanelWith:initiatedByFrame:completionHandler:)`.
+    //
+    // That WKUIDelegate method — and `WKOpenPanelParameters` — only became
+    // available on iOS in 18.4; on earlier releases they are macOS-only.
+    // Referencing them unconditionally breaks compilation for any integrator
+    // whose deployment target is below 18.4, including our own stated
+    // minimum of iOS 15.
+    //
+    // Leaving it unimplemented is also the better behaviour: WKWebView then
+    // falls back to the system file picker, so `<input type="file">` works
+    // on every supported iOS version. The previous implementation returned
+    // `completionHandler(nil)`, which silently cancelled every upload.
+    //
+    // Integrators who need a custom picker can subclass and implement it
+    // themselves behind `@available(iOS 18.4, *)`.
 
     // MARK: - Helpers
+
+    /// JSON-quote an arbitrary string so it can be embedded in injected JS
+    /// without escaping hazards.
+    private static func jsonQuoted(_ value: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [value]),
+              let s = String(data: data, encoding: .utf8),
+              s.count >= 2
+        else { return "\"\"" }
+        return String(s.dropFirst().dropLast())
+    }
+
 
     /// U+2028 / U+2029 are legal in JSON but were illegal in pre-ES2019 JS
     /// string literals. Modern JavaScriptCore tolerates them, but escape

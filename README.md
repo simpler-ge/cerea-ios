@@ -19,7 +19,13 @@ dependencies: [
 ]
 ```
 
-Minimum iOS 15.
+Minimum iOS 15 to **build**.
+
+> **Runtime caveat.** The hosted widget calls `crypto.randomUUID()`,
+> which WKWebView only provides from **iOS 15.4**. On iOS 15.0–15.3 the
+> SDK compiles and the view loads, but the widget cannot create a chat
+> session. If you must support 15.0–15.3, the widget needs a
+> `crypto.randomUUID` polyfill server-side.
 
 ## Use
 
@@ -28,7 +34,7 @@ import CereaChat
 
 let chat = CereaChatViewController(
   token: "<widget-token-from-dashboard>",
-  userToken: userTokenFromYourBackend,        // optional, enables history
+  userToken: userTokenFromYourBackend,        // identity + history (see below)
   attributes: ["plan": "pro"]
 )
 present(chat, animated: true)
@@ -37,13 +43,36 @@ present(chat, animated: true)
 chat.updateContext(["current_screen": "billing"])
 ```
 
-### Identity & history (optional)
+### Identity & history
 
 If `userToken` is provided — an HS256 JWT signed by your backend with
 the agent's HMAC secret (claims: `aud: "cerea-identity"`, `user_id`,
 `exp` ≤24h) — the visitor's conversations persist across devices and
-reinstalls, and the in-widget history drawer activates. Without it,
-each install is anonymous and scoped to that device.
+reinstalls, and the in-widget history drawer activates.
+
+**A visitor identity is required to start a conversation.** The session
+endpoint rejects anonymous visitors with `identity_required`. Supply one
+of:
+
+1. **`userToken`** — recommended for apps where the user is signed in.
+2. **A pre-chat form** — enable it on the agent in the Cerea dashboard
+   (Theme → Pre-chat form) so the widget collects a name plus a phone
+   number or e-mail address before the first message.
+
+Without either, the widget renders and shows the greeting but cannot
+send messages.
+
+The JWT must be signed with the agent's **HMAC secret exactly as shown in
+the dashboard** (the hex string is used as UTF-8 text, not decoded to
+bytes) and must include an `iat` claim — tokens without `iat` are
+rejected with `invalid_user_token`. Use `user_id`; `sub` alone is not
+accepted.
+
+```
+header  { "alg": "HS256", "typ": "JWT" }
+payload { "aud": "cerea-identity", "user_id": "<your id>",
+          "iat": <now>, "exp": <now + ≤86400> }
+```
 
 ### Self-hosted widget
 
