@@ -43,6 +43,20 @@ present(chat, animated: true)
 chat.updateContext(["current_screen": "billing"])
 ```
 
+### Closing the chat
+
+Presented modally, the controller draws its own close button (top-leading,
+inside the safe area) and dismisses itself when tapped. `.fullScreen` has no
+swipe-to-dismiss, so without that button the user has no way back out.
+
+```swift
+chat.onClose = { print("chat closed") }   // optional
+chat.showsCloseButton = false             // you supply your own chrome
+```
+
+The button hides itself automatically when the controller is pushed onto a
+`UINavigationController` — the back item already covers it.
+
 ### Identity & history
 
 If `userToken` is provided — an HS256 JWT signed by your backend with
