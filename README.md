@@ -15,7 +15,7 @@ Or in `Package.swift`:
 
 ```swift
 dependencies: [
-  .package(url: "https://github.com/simpler-ge/cerea-ios", from: "0.1.1")
+  .package(url: "https://github.com/simpler-ge/cerea-ios", from: "0.1.3")
 ]
 ```
 
