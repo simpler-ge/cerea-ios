@@ -193,15 +193,19 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
         view.backgroundColor = .systemBackground
         view.addSubview(webView)
         NSLayoutConstraint.activate([
-            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            // Track the keyboard instead of running under it. WKWebView does
+            // not resize for the keyboard on its own, so a full-height web view
+            // keeps laying out at full height and the widget's fixed header
+            // scrolls out of sight the moment the composer takes focus.
+            webView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
             webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
 
         // Close affordance. It gets its own strip above the web view rather
-        // than floating over it: the widget's header is full-bleed — avatar on
-        // the leading edge, history/new-chat on the trailing edge — so an
-        // overlaid button lands on top of the customer's logo.
+        // than floating over it: the widget's header is full-bleed, so an
+        // overlaid button lands on top of the customer's logo or its own
+        // history/new-chat controls.
         closeButton = UIButton(type: .system)
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.accessibilityLabel = NSLocalizedString(
@@ -219,8 +223,8 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
         }
         view.addSubview(closeButton)
         NSLayoutConstraint.activate([
-            closeButton.leadingAnchor.constraint(
-                equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            closeButton.trailingAnchor.constraint(
+                equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
             closeButton.topAnchor.constraint(
                 equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
             closeButton.widthAnchor.constraint(equalToConstant: 32),

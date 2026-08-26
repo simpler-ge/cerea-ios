@@ -45,7 +45,7 @@ chat.updateContext(["current_screen": "billing"])
 
 ### Closing the chat
 
-Presented modally, the controller draws its own close button (top-leading,
+Presented modally, the controller draws its own close button (top-trailing,
 inside the safe area) and dismisses itself when tapped. `.fullScreen` has no
 swipe-to-dismiss, so without that button the user has no way back out.
 
