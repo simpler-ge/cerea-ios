@@ -36,6 +36,27 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
     private let host: String
     private var attributes: [String: Any]
     private var webView: WKWebView!
+    private var closeButton: UIButton!
+    /// Web view starts below the close button when we draw one, flush with the
+    /// safe area when we don't. Swapped in `updateCloseButtonVisibility`.
+    private var webViewTopBelowButton: NSLayoutConstraint!
+    private var webViewTopAtSafeArea: NSLayoutConstraint!
+
+    /// Whether the SDK draws its own close button.
+    ///
+    /// `true` by default. Presented modally there is otherwise no way out of
+    /// the chat: `.fullScreen` has no swipe-to-dismiss and we draw no
+    /// navigation bar, so the user has to force-quit the app. Set this to
+    /// `false` if you supply your own dismissal chrome. It is ignored — and no
+    /// button is drawn — when this controller sits inside a
+    /// `UINavigationController`, which already provides a back item.
+    public var showsCloseButton: Bool = true {
+        didSet { updateCloseButtonVisibility() }
+    }
+
+    /// Called after the user taps the close button and the controller has been
+    /// dismissed (or popped). Use it to drop your reference to the chat.
+    public var onClose: (() -> Void)?
 
     /// - parameters:
     ///   - token:      Public widget token from the Cerea dashboard.
@@ -172,15 +193,55 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
         view.backgroundColor = .systemBackground
         view.addSubview(webView)
         NSLayoutConstraint.activate([
-            webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            // Track the keyboard instead of running under it. WKWebView does
+            // not resize for the keyboard on its own, so a full-height web view
+            // keeps laying out at full height and the widget's fixed header
+            // scrolls out of sight the moment the composer takes focus.
+            webView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
             webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
+
+        // Close affordance. It gets its own strip above the web view rather
+        // than floating over it: the widget's header is full-bleed, so an
+        // overlaid button lands on top of the customer's logo or its own
+        // history/new-chat controls.
+        closeButton = UIButton(type: .system)
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        closeButton.accessibilityLabel = NSLocalizedString(
+            "Close chat",
+            comment: "Accessibility label for the Cerea chat close button"
+        )
+        closeButton.tintColor = .label
+        closeButton.backgroundColor = .secondarySystemBackground
+        closeButton.layer.cornerRadius = 16
+        closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
+        if #available(iOS 13.0, *) {
+            closeButton.setImage(UIImage(systemName: "xmark"), for: .normal)
+        } else {
+            closeButton.setTitle("✕", for: .normal)
+        }
+        view.addSubview(closeButton)
+        NSLayoutConstraint.activate([
+            closeButton.trailingAnchor.constraint(
+                equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            closeButton.topAnchor.constraint(
+                equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
+            closeButton.widthAnchor.constraint(equalToConstant: 32),
+            closeButton.heightAnchor.constraint(equalToConstant: 32),
+        ])
+
+        webViewTopBelowButton = webView.topAnchor.constraint(
+            equalTo: closeButton.bottomAnchor, constant: 6)
+        webViewTopAtSafeArea = webView.topAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.topAnchor)
+        // Resolved in updateCloseButtonVisibility(), called from viewDidLoad.
+        webViewTopBelowButton.isActive = true
     }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
+        updateCloseButtonVisibility()
         guard let url = URL(string: "\(host)/w/\(token)") else { return }
         var request = URLRequest(url: url)
         // Bundle ID is the iOS "origin" for allowlist verification.
@@ -229,6 +290,46 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
         } else {
             decisionHandler(.cancel)
             UIApplication.shared.open(target)
+        }
+    }
+
+    // MARK: - Dismissal
+
+    /// Hide the SDK's own button when the host already provides a way back —
+    /// i.e. we're inside a navigation controller — or when the integrator
+    /// opted out via `showsCloseButton`.
+    private func updateCloseButtonVisibility() {
+        guard closeButton != nil else { return }
+        let shows = showsCloseButton && navigationController == nil
+        closeButton.isHidden = !shows
+        // Reclaim the strip when the button is hidden, so integrators who
+        // supply their own chrome still get a full-bleed widget.
+        webViewTopBelowButton.isActive = false
+        webViewTopAtSafeArea.isActive = false
+        (shows ? webViewTopBelowButton : webViewTopAtSafeArea)?.isActive = true
+    }
+
+    public override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        updateCloseButtonVisibility()
+    }
+
+    @objc private func closeTapped() {
+        if let nav = navigationController, nav.viewControllers.first !== self {
+            nav.popViewController(animated: true)
+            onClose?()
+        } else if presentingViewController != nil {
+            dismiss(animated: true) { [weak self] in
+                guard let self else { return }
+                self.onClose?()
+            }
+        } else {
+            // Embedded as a child view controller: detach ourselves so the
+            // host isn't left with a dead view it never asked to remove.
+            willMove(toParent: nil)
+            view.removeFromSuperview()
+            removeFromParent()
+            onClose?()
         }
     }
 
