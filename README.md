@@ -64,17 +64,17 @@ the agent's HMAC secret (claims: `aud: "cerea-identity"`, `user_id`,
 `exp` ≤24h) — the visitor's conversations persist across devices and
 reinstalls, and the in-widget history drawer activates.
 
-**A visitor identity is required to start a conversation.** The session
-endpoint rejects anonymous visitors with `identity_required`. Supply one
-of:
+**A visitor identity is required to start a conversation, and on iOS
+`userToken` is the only way to supply one.** The session endpoint rejects
+anonymous visitors with `identity_required`.
 
-1. **`userToken`** — recommended for apps where the user is signed in.
-2. **A pre-chat form** — enable it on the agent in the Cerea dashboard
-   (Theme → Pre-chat form) so the widget collects a name plus a phone
-   number or e-mail address before the first message.
+The pre-chat form is **not** an alternative here: the widget only renders
+it on the `webchat` surface, so enabling it on a mobile agent has no
+effect no matter what the dashboard shows.
 
-Without either, the widget renders and shows the greeting but cannot
-send messages.
+Without a `userToken` the widget still renders and shows the greeting —
+so it looks like it is working — but no session exists, sending a message
+does nothing, and attaching a file fails with `401`.
 
 The JWT must be signed with the agent's **HMAC secret exactly as shown in
 the dashboard** (the hex string is used as UTF-8 text, not decoded to
