@@ -1,6 +1,18 @@
 import UIKit
 import WebKit
 
+/// Something the widget reports to the app. Delivered through
+/// `CereaChatViewController.onEvent`.
+public enum CereaChatEvent: String {
+    /// The widget has loaded its configuration and theme.
+    case ready
+    /// The chat window is showing.
+    case open
+    /// The user tapped the close button in the widget's header. The
+    /// controller closes itself right after reporting it.
+    case close
+}
+
 /// Embeds the Cerea chat widget as a full-screen iOS view.
 ///
 /// Usage:
@@ -14,6 +26,9 @@ import WebKit
 ///
 /// // Dynamic context updates as the user navigates your app
 /// chat.updateContext(["current_screen": "billing"])
+///
+/// // Optional: hear what the widget reports
+/// chat.onEvent = { event in print("widget:", event) }
 /// ```
 ///
 /// `userToken` is an HS256 JWT signed by your backend with the agent's HMAC
@@ -36,27 +51,49 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
     private let host: String
     private var attributes: [String: Any]
     private var webView: WKWebView!
+    private var userContent: WKUserContentController?
+    /// Set once a close is under way, so the header button and the SDK's own
+    /// button tapped together cannot dismiss twice or fire `onClose` twice.
+    private var isClosing = false
+    /// Whether the current page has reported `open`. Older widget builds
+    /// report `close` while starting up, before `open`; acting on that would
+    /// shut the chat as it appears. Reset on every page load.
+    private var widgetOpened = false {
+        didSet { updateCloseButtonVisibility() }
+    }
     private var closeButton: UIButton!
-    /// Web view starts below the close button when we draw one, flush with the
-    /// safe area when we don't. Swapped in `updateCloseButtonVisibility`.
+    /// Web view starts below the close button when it has its own strip, flush
+    /// with the safe area otherwise. Swapped in `updateCloseButtonVisibility`.
     private var webViewTopBelowButton: NSLayoutConstraint!
     private var webViewTopAtSafeArea: NSLayoutConstraint!
+    /// Position of the SDK's button; differs between its strip and floating.
+    private var closeButtonTrailing: NSLayoutConstraint!
+    private var closeButtonTop: NSLayoutConstraint!
 
-    /// Whether the SDK draws its own close button.
+    /// Whether the SDK keeps its own close button on screen, in a strip above
+    /// the widget.
     ///
-    /// `true` by default. Presented modally there is otherwise no way out of
-    /// the chat: `.fullScreen` has no swipe-to-dismiss and we draw no
-    /// navigation bar, so the user has to force-quit the app. Set this to
-    /// `false` if you supply your own dismissal chrome. It is ignored — and no
-    /// button is drawn — when this controller sits inside a
-    /// `UINavigationController`, which already provides a back item.
-    public var showsCloseButton: Bool = true {
+    /// `false` by default: the widget's header has its own close button, and
+    /// two stacked crosses looked broken. Until the widget reports that it is
+    /// open, the SDK still floats its button over the top-trailing corner —
+    /// `.fullScreen` has no swipe-to-dismiss, so a page that is slow or fails
+    /// to load must not leave the user with no way out. Set `true` for the
+    /// 0.1.3 layout. No button is drawn inside a `UINavigationController`,
+    /// whose back item already covers it.
+    public var showsCloseButton: Bool = false {
         didSet { updateCloseButtonVisibility() }
     }
 
-    /// Called after the user taps the close button and the controller has been
-    /// dismissed (or popped). Use it to drop your reference to the chat.
+    /// Called after the user closes the chat — with the SDK's own button or the
+    /// one in the widget's header — and the controller has been dismissed (or
+    /// popped). Use it to drop your reference to the chat.
     public var onClose: (() -> Void)?
+
+    /// Called on the main thread for each event the widget reports: `.ready`,
+    /// `.open`, and `.close` when the user taps the widget's header close
+    /// button. You do not need to act on `.close` — the controller closes
+    /// itself and then calls `onClose`.
+    public var onEvent: ((CereaChatEvent) -> Void)?
 
     /// - parameters:
     ///   - token:      Public widget token from the Cerea dashboard.
@@ -176,11 +213,16 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
-        // Deliberately NOT registering a WKScriptMessageHandler. Doing so
-        // creates a retain cycle (WKUserContentController retains the handler
-        // strongly, the handler owns the WebView which owns the
-        // contentController). We don't currently consume widget→native
-        // messages, so the registration would leak the VC for no benefit.
+        // The widget reports ready/open/close to a script message handler
+        // named "cerea". WKUserContentController retains its handlers
+        // strongly, and this controller owns the web view that owns the
+        // content controller — registering `self` would leak the chat on every
+        // dismissal. The proxy holds us weakly, which breaks that cycle.
+        userContent.add(
+            WeakScriptMessageProxy(owner: self),
+            name: Self.hostBridgeName
+        )
+        self.userContent = userContent
         config.userContentController = userContent
         config.allowsInlineMediaPlayback = true
 
@@ -222,11 +264,13 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
             closeButton.setTitle("✕", for: .normal)
         }
         view.addSubview(closeButton)
+        closeButtonTrailing = closeButton.trailingAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.trailingAnchor)
+        closeButtonTop = closeButton.topAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.topAnchor)
         NSLayoutConstraint.activate([
-            closeButton.trailingAnchor.constraint(
-                equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
-            closeButton.topAnchor.constraint(
-                equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
+            closeButtonTrailing,
+            closeButtonTop,
             closeButton.widthAnchor.constraint(equalToConstant: 32),
             closeButton.heightAnchor.constraint(equalToConstant: 32),
         ])
@@ -237,6 +281,17 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
             equalTo: view.safeAreaLayoutGuide.topAnchor)
         // Resolved in updateCloseButtonVisibility(), called from viewDidLoad.
         webViewTopBelowButton.isActive = true
+    }
+
+    deinit {
+        userContent?.removeScriptMessageHandler(forName: Self.hostBridgeName)
+    }
+
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // Shown again after an earlier close — the same instance may be
+        // re-presented, and it must be closable again.
+        isClosing = false
     }
 
     public override func viewDidLoad() {
@@ -293,20 +348,31 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
         }
     }
 
+    /// A new page starts over: its `close` counts only after its own `open`.
+    public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        widgetOpened = false
+    }
+
     // MARK: - Dismissal
 
-    /// Hide the SDK's own button when the host already provides a way back —
-    /// i.e. we're inside a navigation controller — or when the integrator
-    /// opted out via `showsCloseButton`.
+    /// Three states. Inside a navigation controller: no button, the back item
+    /// covers it. `showsCloseButton`: the button keeps its own strip above the
+    /// widget. Otherwise it floats over the widget only until the page reports
+    /// `open` — by then the header's close button is on screen and works.
     private func updateCloseButtonVisibility() {
         guard closeButton != nil else { return }
-        let shows = showsCloseButton && navigationController == nil
-        closeButton.isHidden = !shows
-        // Reclaim the strip when the button is hidden, so integrators who
-        // supply their own chrome still get a full-bleed widget.
+        let hostHasBack = navigationController != nil
+        let inStrip = showsCloseButton && !hostHasBack
+        let floating = !showsCloseButton && !hostHasBack && !widgetOpened
+        closeButton.isHidden = !(inStrip || floating)
+        // Floating, it sits exactly over the widget header's own 32pt close
+        // button (22pt header padding, centred in the row), so the user sees
+        // one cross whichever of the two is live.
+        closeButtonTrailing.constant = inStrip ? -12 : -22
+        closeButtonTop.constant = inStrip ? 6 : 22
         webViewTopBelowButton.isActive = false
         webViewTopAtSafeArea.isActive = false
-        (shows ? webViewTopBelowButton : webViewTopAtSafeArea)?.isActive = true
+        (inStrip ? webViewTopBelowButton : webViewTopAtSafeArea)?.isActive = true
     }
 
     public override func didMove(toParent parent: UIViewController?) {
@@ -315,6 +381,14 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
     }
 
     @objc private func closeTapped() {
+        close()
+    }
+
+    /// The one way out, shared by the SDK's button and the widget's header
+    /// button, so both leave the host in the same state.
+    private func close() {
+        guard !isClosing else { return }
+        isClosing = true
         if let nav = navigationController, nav.viewControllers.first !== self {
             nav.popViewController(animated: true)
             onClose?()
@@ -331,6 +405,38 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
             removeFromParent()
             onClose?()
         }
+    }
+
+    // MARK: - Widget → app events
+
+    /// Name the widget posts to: `window.webkit.messageHandlers.cerea`.
+    private static let hostBridgeName = "cerea"
+    private static let hostBridgeNamespace = "cerea.widget.v1"
+
+    /// Only the widget's own top-level page may drive the controller. A
+    /// message from any other frame or origin — an embedded iframe, or a page
+    /// reached by navigation — is ignored.
+    fileprivate func receive(_ message: WKScriptMessage) {
+        guard message.name == Self.hostBridgeName,
+              message.frameInfo.isMainFrame,
+              let widgetHost = URL(string: host)?.host,
+              message.frameInfo.securityOrigin.host == widgetHost,
+              let body = message.body as? [String: Any],
+              body["ns"] as? String == Self.hostBridgeNamespace,
+              let type = body["type"] as? String,
+              let event = CereaChatEvent(rawValue: type)
+        else { return }
+        switch event {
+        case .open:
+            widgetOpened = true
+        case .close:
+            // Start-up state from an older widget, not the user asking out.
+            guard widgetOpened else { return }
+        case .ready:
+            break
+        }
+        onEvent?(event)
+        if event == .close { close() }
     }
 
     // MARK: - WKUIDelegate (file uploads)
@@ -374,5 +480,22 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
         return json
             .replacingOccurrences(of: lineSep, with: "\\u2028")
             .replacingOccurrences(of: paraSep, with: "\\u2029")
+    }
+}
+
+/// Forwards script messages to the chat without retaining it. See the
+/// registration in `loadView` for the cycle this breaks.
+private final class WeakScriptMessageProxy: NSObject, WKScriptMessageHandler {
+    private weak var owner: CereaChatViewController?
+
+    init(owner: CereaChatViewController) {
+        self.owner = owner
+    }
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        owner?.receive(message)
     }
 }

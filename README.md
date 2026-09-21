@@ -45,17 +45,45 @@ chat.updateContext(["current_screen": "billing"])
 
 ### Closing the chat
 
-Presented modally, the controller draws its own close button (top-trailing,
-inside the safe area) and dismisses itself when tapped. `.fullScreen` has no
-swipe-to-dismiss, so without that button the user has no way back out.
+The close button is the one in the widget's own header. Tapping it dismisses
+the controller (or pops it, if pushed) and then calls `onClose`:
 
 ```swift
 chat.onClose = { print("chat closed") }   // optional
-chat.showsCloseButton = false             // you supply your own chrome
 ```
 
-The button hides itself automatically when the controller is pushed onto a
-`UINavigationController` — the back item already covers it.
+`.fullScreen` has no swipe-to-dismiss, so while the widget is still loading —
+or if the page fails to load — the SDK floats its own close button over the
+same spot. It disappears as soon as the widget reports it is open, so the user
+only ever sees one. Inside a `UINavigationController` it is never drawn; the
+back item covers it.
+
+To keep the SDK's button on screen permanently, in its own strip above the
+widget (the 0.1.3 layout):
+
+```swift
+chat.showsCloseButton = true
+```
+
+### Widget events (0.1.4+)
+
+```swift
+chat.onEvent = { event in
+  switch event {
+  case .ready: break   // widget loaded its configuration
+  case .open:  break   // chat window showing
+  case .close: break   // user tapped the header close button
+  }
+}
+```
+
+You do not need to act on `.close`; the controller closes itself right after
+reporting it. Events arrive on the main thread.
+
+> **Do not register your own `cerea` script message handler.** The SDK
+> registers it, and WebKit throws `NSInvalidArgumentException` when a second
+> handler is added under the same name. If you previously reached into the
+> web view to listen for these events, remove that code when you update.
 
 ### Identity & history
 
@@ -126,8 +154,9 @@ present(chat, animated: true)
 
 ## Security notes
 
-The SDK never registers a `WKScriptMessageHandler` (avoids the retain
-cycle that would leak the view controller across dismissal), routes
+The SDK registers its `cerea` script message handler through a weak proxy,
+so the view controller is not leaked across dismissal, and only acts on
+messages from the widget's own top-level page. It routes
 external link taps to Safari via `WKNavigationDelegate`, and escapes
 U+2028 / U+2029 in injected JSON. The visitor's Bundle ID is sent as
 `X-Cerea-Bundle-Id` for server-side allowlist verification.
