@@ -45,21 +45,25 @@ chat.updateContext(["current_screen": "billing"])
 
 ### Closing the chat
 
-The user can close the chat two ways, and both do the same thing — the
-controller dismisses itself (or pops, if pushed) and then calls `onClose`:
-
-- the close button in the widget's own header;
-- the SDK's close button (top-trailing, inside the safe area). `.fullScreen`
-  has no swipe-to-dismiss, so this one stays as a way out even if the page
-  fails to load.
+The close button is the one in the widget's own header. Tapping it dismisses
+the controller (or pops it, if pushed) and then calls `onClose`:
 
 ```swift
 chat.onClose = { print("chat closed") }   // optional
-chat.showsCloseButton = false             // rely on the widget's header button
 ```
 
-The SDK's button hides itself automatically when the controller is pushed onto
-a `UINavigationController` — the back item already covers it.
+`.fullScreen` has no swipe-to-dismiss, so while the widget is still loading —
+or if the page fails to load — the SDK floats its own close button over the
+same spot. It disappears as soon as the widget reports it is open, so the user
+only ever sees one. Inside a `UINavigationController` it is never drawn; the
+back item covers it.
+
+To keep the SDK's button on screen permanently, in its own strip above the
+widget (the 0.1.3 layout):
+
+```swift
+chat.showsCloseButton = true
+```
 
 ### Widget events (0.1.4+)
 

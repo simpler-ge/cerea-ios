@@ -58,22 +58,29 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
     /// Whether the current page has reported `open`. Older widget builds
     /// report `close` while starting up, before `open`; acting on that would
     /// shut the chat as it appears. Reset on every page load.
-    private var widgetOpened = false
+    private var widgetOpened = false {
+        didSet { updateCloseButtonVisibility() }
+    }
     private var closeButton: UIButton!
-    /// Web view starts below the close button when we draw one, flush with the
-    /// safe area when we don't. Swapped in `updateCloseButtonVisibility`.
+    /// Web view starts below the close button when it has its own strip, flush
+    /// with the safe area otherwise. Swapped in `updateCloseButtonVisibility`.
     private var webViewTopBelowButton: NSLayoutConstraint!
     private var webViewTopAtSafeArea: NSLayoutConstraint!
+    /// Position of the SDK's button; differs between its strip and floating.
+    private var closeButtonTrailing: NSLayoutConstraint!
+    private var closeButtonTop: NSLayoutConstraint!
 
-    /// Whether the SDK draws its own close button.
+    /// Whether the SDK keeps its own close button on screen, in a strip above
+    /// the widget.
     ///
-    /// `true` by default. Presented modally there is otherwise no way out of
-    /// the chat: `.fullScreen` has no swipe-to-dismiss and we draw no
-    /// navigation bar, so the user has to force-quit the app. Set this to
-    /// `false` if you supply your own dismissal chrome. It is ignored — and no
-    /// button is drawn — when this controller sits inside a
-    /// `UINavigationController`, which already provides a back item.
-    public var showsCloseButton: Bool = true {
+    /// `false` by default: the widget's header has its own close button, and
+    /// two stacked crosses looked broken. Until the widget reports that it is
+    /// open, the SDK still floats its button over the top-trailing corner —
+    /// `.fullScreen` has no swipe-to-dismiss, so a page that is slow or fails
+    /// to load must not leave the user with no way out. Set `true` for the
+    /// 0.1.3 layout. No button is drawn inside a `UINavigationController`,
+    /// whose back item already covers it.
+    public var showsCloseButton: Bool = false {
         didSet { updateCloseButtonVisibility() }
     }
 
@@ -257,11 +264,13 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
             closeButton.setTitle("✕", for: .normal)
         }
         view.addSubview(closeButton)
+        closeButtonTrailing = closeButton.trailingAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.trailingAnchor)
+        closeButtonTop = closeButton.topAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.topAnchor)
         NSLayoutConstraint.activate([
-            closeButton.trailingAnchor.constraint(
-                equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
-            closeButton.topAnchor.constraint(
-                equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
+            closeButtonTrailing,
+            closeButtonTop,
             closeButton.widthAnchor.constraint(equalToConstant: 32),
             closeButton.heightAnchor.constraint(equalToConstant: 32),
         ])
@@ -346,18 +355,24 @@ public final class CereaChatViewController: UIViewController, WKUIDelegate, WKNa
 
     // MARK: - Dismissal
 
-    /// Hide the SDK's own button when the host already provides a way back —
-    /// i.e. we're inside a navigation controller — or when the integrator
-    /// opted out via `showsCloseButton`.
+    /// Three states. Inside a navigation controller: no button, the back item
+    /// covers it. `showsCloseButton`: the button keeps its own strip above the
+    /// widget. Otherwise it floats over the widget only until the page reports
+    /// `open` — by then the header's close button is on screen and works.
     private func updateCloseButtonVisibility() {
         guard closeButton != nil else { return }
-        let shows = showsCloseButton && navigationController == nil
-        closeButton.isHidden = !shows
-        // Reclaim the strip when the button is hidden, so integrators who
-        // supply their own chrome still get a full-bleed widget.
+        let hostHasBack = navigationController != nil
+        let inStrip = showsCloseButton && !hostHasBack
+        let floating = !showsCloseButton && !hostHasBack && !widgetOpened
+        closeButton.isHidden = !(inStrip || floating)
+        // Floating, it sits exactly over the widget header's own 32pt close
+        // button (22pt header padding, centred in the row), so the user sees
+        // one cross whichever of the two is live.
+        closeButtonTrailing.constant = inStrip ? -12 : -22
+        closeButtonTop.constant = inStrip ? 6 : 22
         webViewTopBelowButton.isActive = false
         webViewTopAtSafeArea.isActive = false
-        (shows ? webViewTopBelowButton : webViewTopAtSafeArea)?.isActive = true
+        (inStrip ? webViewTopBelowButton : webViewTopAtSafeArea)?.isActive = true
     }
 
     public override func didMove(toParent parent: UIViewController?) {
